@@ -1,0 +1,35 @@
+Ayush Singh
+Phone: +91 7889440379 | Email: ayushtomar8624@gmail.com
+LinkedIn: linkedin.com/in/ayush-pratap-singh1 | GitHub: github.com/tomar-ayush
+
+EDUCATION
+Chitkara University, Chandigarh (2022-2026)
+B.E. in Computer Science & Engineering | CGPA: 9.32/10
+
+TECHNICAL SKILLS
+Frontend: JavaScript, TypeScript, React.js (Hooks, Redux, TanStack Query), Next.js (SSR, App Router)
+Backend & Data: Node.js, Express.js, Python, Java, FastAPI, Kafka, Apache Airflow, ETL Pipelines, SQL, PostgreSQL, MongoDB, Neo4j
+AI & LLM: LangChain, LangGraph, RAG, Prompt Engineering, Vector Search
+Cloud, DevOps & Security: AWS (S3, EC2), Docker, CI/CD (Jenkins), Git, Linux (RHEL, Debian, Ubuntu), Authentication, OIDC, Kerberos
+CS Fundamentals: Data Structures & Algorithms, OOP, OS, Computer Networks
+
+EXPERIENCE
+Morgan Stanley | Software Developer Apprentice (Technology Control Group) | Aug 2025 - Present | Bengaluru, India
+- Contributed to Sentinel, Morgan Stanley's centralized cyber-risk data platform supporting risk aggregation, compliance evaluation, and enterprise-wide risk analytics across multiple downstream applications including TRFS and PAC.
+- Contributed to the productionization of a Kafka-based Policy-as-Code (PAC) platform that evaluated repository compliance against organizational security policies, integrating repository scan results, metadata enrichment, Neo4j graph contextualization, and Open Policy Agent (OPA) policy evaluation workflows.
+- Architected an end-to-end regression validation framework that verified Airflow workflow execution, S3 data integrity, Neo4j graph updates, relationship consistency, and incremental-load reconciliation for created, updated, and deleted entities, reducing release validation time from 2-3 days to 5-7 hours through automated execution and reporting.
+- Designed and implemented a multi-agent RAG assistant for cyber-risk documentation and score search using LangGraph, featuring LLM-based intent detection, supervisor-driven orchestration, task-specific ReAct agents for risk-score retrieval and documentation search, and a reflection stage for response quality evaluation before final answer generation.
+- Implemented Apache Airflow ETL workflows to onboard new risk data sources into an enterprise fitness-scoring platform, handling source-specific ingestion, transformation, and scoring requirements while introducing incremental (delta) processing that reduced runtime by 30-40%.
+- Optimized large-scale Neo4j inserts by rewriting multi-transaction logic with UNWIND, significantly reducing database round trips and ingestion time.
+
+PROJECTS
+ApplyAI | React, TypeScript, FastAPI, PostgreSQL, OpenAI, Playwright, AWS Lambda, Cloudflare R2
+- Built an AI-powered job application platform that automates resume optimization, referral discovery, and browser-assisted job applications while tracking the complete application lifecycle.
+- Designed an asynchronous resume optimization pipeline supporting multiple LLM providers, parallel section-level optimization, ATS keyword matching, and constrained latex editing to preserve document formatting before serverless PDF generation.
+- Engineered a FastAPI backend with PostgreSQL, Alembic, and Cloudflare R2 for job tracking, task orchestration, secure resume artifact storage, and pre-signed URL delivery of original and optimized resumes.
+- Implemented Playwright automation for LinkedIn referral requests and Workday applications using distributed local workers connected through Cloudflare Tunnel, with callback-based task updates and human approval before submission.
+
+Outreach | Next.js, TypeScript, MongoDB, Gemini AI, Cheerio
+- Built and deployed an end-to-end cold email pipeline integrating LLM-based content generation with automated web scraping for personalized company-specific outreach.
+- Implemented Cheerio-based scraping to extract organizational data and generate context-aware emails using Gemini AI.
+- Engineered a CRUD-based subscriber management system with segmentation, CSV import, and authentication for secure campaign management.

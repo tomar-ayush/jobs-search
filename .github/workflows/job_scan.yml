@@ -1,0 +1,41 @@
+name: Job Scanner
+
+on:
+  schedule:
+    # Run every 4 hours
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Decode Astra DB secure connect bundle
+        run: echo "${{ secrets.ASTRA_DB_BUNDLE_BASE64 }}" | base64 -d > secure-connect-jobs_store.zip
+
+      - name: Run job scanner
+        env:
+          ASTRA_DB_BUNDLE_PATH: ./secure-connect-jobs_store.zip
+          ASTRA_DB_CLIENT_ID: ${{ secrets.ASTRA_DB_CLIENT_ID }}
+          ASTRA_DB_CLIENT_SECRET: ${{ secrets.ASTRA_DB_CLIENT_SECRET }}
+          ASTRA_DB_TOKEN: ${{ secrets.ASTRA_DB_TOKEN }}
+          ASTRA_DB_KEYSPACE: ${{ secrets.ASTRA_DB_KEYSPACE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: python main.py
