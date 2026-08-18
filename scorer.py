@@ -1,12 +1,14 @@
 """Gemini LLM-based job relevance scorer.
 
-Sends your resume + each job description to Gemini and receives
-a structured relevance score (1-10) with reasoning.
+Sends your resume + a batch of job descriptions to Gemini and receives
+a structured relevance score (1-10) with reasoning for each job.
+Batching reduces the number of API requests and overall token usage.
 """
 
 import json
 import logging
 import time
+from typing import List, Dict, Any
 
 from google import genai
 from google.genai import types
@@ -32,27 +34,26 @@ You are a job-fit evaluator for a software engineering candidate.
 CANDIDATE RESUME:
 {resume}
 
-JOB TITLE: {title}
-COMPANY: {company}
-LOCATION: {location}
-
-JOB DESCRIPTION:
-{description}
-
-Evaluate how well this candidate fits this job. Consider:
+You will be provided with a batch of jobs.
+Evaluate how well this candidate fits each job. Consider:
 1. Technical skill overlap (how many required skills does the candidate have?)
 2. Experience level match (candidate has ~1 year of experience as an apprentice)
 3. Domain relevance (backend, data engineering, AI/LLM, full-stack)
 4. Growth potential (can the candidate realistically grow into this role?)
 5. Location fit (candidate is based in India)
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+For EACH job, provide an evaluation.
+Respond with ONLY a JSON object (no markdown, no code fences). The keys should be the JOB_ID provided in the input, and the values should be the evaluation object.
+Example format:
 {{
-    "score": <1-10 integer>,
-    "reasoning": "<2-3 sentence explanation>",
-    "matching_skills": ["<skill1>", "<skill2>", ...],
-    "missing_skills": ["<skill1>", "<skill2>", ...],
-    "seniority_fit": "<too_junior|good|stretch|too_senior>"
+    "JOB_0": {{
+        "score": <1-10 integer>,
+        "reasoning": "<2-3 sentence explanation>",
+        "matching_skills": ["<skill1>", "<skill2>"],
+        "missing_skills": ["<skill1>", "<skill2>"],
+        "seniority_fit": "<too_junior|good|stretch|too_senior>"
+    }},
+    "JOB_1": {{ ... }}
 }}
 
 Scoring guide:
@@ -61,6 +62,9 @@ Scoring guide:
 - 5-6: Decent match, some skill gaps but learnable
 - 3-4: Weak match, significant gaps
 - 1-2: Poor match, wrong domain or way too senior
+
+JOBS TO EVALUATE:
+{jobs_text}
 """
 
 _resume_text: str | None = None
@@ -74,34 +78,29 @@ def _get_resume() -> str:
     return _resume_text
 
 
-def score_job(title: str, company: str, location: str, description: str) -> dict:
-    """Score a single job against the candidate's resume using Gemini.
+def score_jobs_batch(jobs_batch: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Scores a batch of up to 25 jobs in a single prompt."""
+    if not jobs_batch:
+        return {}
 
-    Args:
-        title: Job title
-        company: Company name
-        location: Job location
-        description: Full job description text
-
-    Returns:
-        Dict with keys: score, reasoning, matching_skills, missing_skills, seniority_fit.
-        On failure, returns a dict with score=0.
-    """
-    if not description or not description.strip():
-        return {
-            "score": 0,
-            "reasoning": "No job description available for scoring.",
-            "matching_skills": [],
-            "missing_skills": [],
-            "seniority_fit": "unknown",
-        }
+    jobs_text_parts = []
+    for i, job in enumerate(jobs_batch):
+        title = job.get("title", "Unknown")
+        company = job.get("company", "Unknown")
+        location = job.get("location", "Unknown")
+        # Cap description aggressively when batching to avoid hitting prompt limits
+        # 1500 chars is usually enough to capture core responsibilities/requirements
+        desc = job.get("description", "")[:1500] 
+        
+        jobs_text_parts.append(
+            f"--- JOB_{i} ---\nTITLE: {title}\nCOMPANY: {company}\nLOCATION: {location}\nDESCRIPTION:\n{desc}\n"
+        )
+    
+    jobs_text = "\n".join(jobs_text_parts)
 
     prompt = SCORING_PROMPT.format(
         resume=_get_resume(),
-        title=title or "Unknown",
-        company=company or "Unknown",
-        location=location or "Unknown",
-        description=description[:4000],  # cap to avoid token limits
+        jobs_text=jobs_text
     )
 
     try:
@@ -110,7 +109,7 @@ def score_job(title: str, company: str, location: str, description: str) -> dict
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,  # low temp for consistent scoring
-                max_output_tokens=500,
+                max_output_tokens=8192,
             ),
         )
 
@@ -121,28 +120,22 @@ def score_job(title: str, company: str, location: str, description: str) -> dict
         if text.endswith("```"):
             text = text[:-3]
         text = text.strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
 
         result = json.loads(text)
-
-        # Validate and normalize
-        result["score"] = max(1, min(10, int(result.get("score", 0))))
-        result.setdefault("reasoning", "")
-        result.setdefault("matching_skills", [])
-        result.setdefault("missing_skills", [])
-        result.setdefault("seniority_fit", "unknown")
-
         return result
 
     except json.JSONDecodeError as e:
-        logger.warning("Failed to parse Gemini response for '%s': %s", title, e)
-        return {"score": 0, "reasoning": f"Parse error: {e}", "matching_skills": [], "missing_skills": [], "seniority_fit": "unknown"}
+        logger.warning("Failed to parse Gemini response for batch: %s", e)
+        return {}
     except Exception as e:
-        logger.warning("Gemini API error for '%s': %s", title, e)
-        return {"score": 0, "reasoning": f"API error: {e}", "matching_skills": [], "missing_skills": [], "seniority_fit": "unknown"}
+        logger.warning("Gemini API error for batch: %s", e)
+        return {}
 
 
-def score_jobs(jobs: list[dict], delay: float = 0.5) -> list[dict]:
-    """Score a batch of jobs, adding score data to each job dict.
+def score_jobs(jobs: list[dict], delay: float = 2.0) -> list[dict]:
+    """Score a list of jobs in batches, adding score data to each job dict.
 
     Args:
         jobs: List of job dicts with keys: title, company, location, description
@@ -152,26 +145,32 @@ def score_jobs(jobs: list[dict], delay: float = 0.5) -> list[dict]:
         The same list with score, reasoning, matching, missing keys added.
     """
     total = len(jobs)
-    logger.info("Scoring %d jobs with Gemini (%s)...", total, GEMINI_MODEL)
+    logger.info("Scoring %d jobs with Gemini (%s) in batches...", total, GEMINI_MODEL)
 
-    for i, job in enumerate(jobs, 1):
-        result = score_job(
-            title=job.get("title", ""),
-            company=job.get("company", ""),
-            location=job.get("location", ""),
-            description=job.get("description", ""),
-        )
+    batch_size = 25
+    scored_count = 0
 
-        job["score"] = result["score"]
-        job["reasoning"] = result["reasoning"]
-        job["matching"] = ", ".join(result.get("matching_skills", []))
-        job["missing"] = ", ".join(result.get("missing_skills", []))
-        job["seniority_fit"] = result.get("seniority_fit", "unknown")
+    for i in range(0, total, batch_size):
+        batch = jobs[i:i + batch_size]
+        batch_results = score_jobs_batch(batch)
 
-        if i % 10 == 0 or i == total:
-            logger.info("  Scored %d/%d (latest: '%s' → %d/10)", i, total, job.get("title", "")[:40], result["score"])
+        for j, job in enumerate(batch):
+            job_key = f"JOB_{j}"
+            res = batch_results.get(job_key, {})
+            
+            job["score"] = max(1, min(10, int(res.get("score", 0))))
+            job["reasoning"] = res.get("reasoning", "Failed to score or parse.")
+            job["matching"] = ", ".join(res.get("matching_skills", []) if isinstance(res.get("matching_skills"), list) else [])
+            job["missing"] = ", ".join(res.get("missing_skills", []) if isinstance(res.get("missing_skills"), list) else [])
+            job["seniority_fit"] = res.get("seniority_fit", "unknown")
 
-        if delay > 0 and i < total:
+        scored_count += len(batch)
+        total_batches = (total + batch_size - 1) // batch_size
+        current_batch = (i // batch_size) + 1
+        logger.info("  Scored batch %d/%d (total %d/%d)", current_batch, total_batches, scored_count, total)
+
+        # Wait before next batch to respect rate limits
+        if delay > 0 and i + batch_size < total:
             time.sleep(delay)
 
     return jobs
