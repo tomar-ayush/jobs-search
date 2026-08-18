@@ -22,7 +22,10 @@ HOURS_OLD = 4  # only jobs from the last 4 hours
 
 # ── Astra DB ──────────────────────────────────────────────────────────
 
-ASTRA_DB_BUNDLE_PATH = os.getenv("ASTRA_DB_BUNDLE_PATH", str(Path(__file__).parent / "secure-connect-jobs_store.zip"))
+ASTRA_DB_BUNDLE_PATH = os.getenv(
+    "ASTRA_DB_BUNDLE_PATH",
+    str(Path(__file__).parent / "secure-connect-jobs_store.zip"),
+)
 ASTRA_DB_CLIENT_ID = os.getenv("ASTRA_DB_CLIENT_ID", "")
 ASTRA_DB_CLIENT_SECRET = os.getenv("ASTRA_DB_CLIENT_SECRET", "")
 ASTRA_DB_TOKEN = os.getenv("ASTRA_DB_TOKEN", "")
@@ -31,20 +34,24 @@ ASTRA_DB_KEYSPACE = os.getenv("ASTRA_DB_KEYSPACE", "jobs_store")
 # ── Gemini ────────────────────────────────────────────────────────────
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.0-flash"  # fast + cheap, good enough for scoring
+GEMINI_MODEL = (
+    "gemini-3.7-flash"  # fast + cheap, good enough for scoring
+)
 
 # ── Email ─────────────────────────────────────────────────────────────
 
 SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")  # your Gmail address
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")  # Gmail App Password
-NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "")  # recipient (can be same as SMTP_EMAIL)
+NOTIFY_EMAIL = os.getenv(
+    "NOTIFY_EMAIL", ""
+)  # recipient (can be same as SMTP_EMAIL)
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
 # ── Scoring & Notification ────────────────────────────────────────────
 
 MIN_SCORE_TO_NOTIFY = 6  # Gemini scores 1-10; email only jobs >= this
-MAX_JOBS_IN_EMAIL = 20   # top N jobs per email
+MAX_JOBS_IN_EMAIL = 20  # top N jobs per email
 
 # ── Resume ────────────────────────────────────────────────────────────
 
@@ -61,10 +68,16 @@ def validate():
     }
     missing = [k for k, v in required.items() if not v]
     if missing:
-        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+        raise ValueError(
+            f"Missing required environment variables: {', '.join(missing)}"
+        )
 
     if not RESUME_TEXT_PATH.exists():
-        raise FileNotFoundError(f"Resume text file not found: {RESUME_TEXT_PATH}")
+        raise FileNotFoundError(
+            f"Resume text file not found: {RESUME_TEXT_PATH}"
+        )
 
     if not Path(ASTRA_DB_BUNDLE_PATH).exists():
-        raise FileNotFoundError(f"Astra secure connect bundle not found: {ASTRA_DB_BUNDLE_PATH}")
+        raise FileNotFoundError(
+            f"Astra secure connect bundle not found: {ASTRA_DB_BUNDLE_PATH}"
+        )
