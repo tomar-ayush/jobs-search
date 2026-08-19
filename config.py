@@ -51,7 +51,7 @@ SMTP_PORT = 587
 # ── Scoring & Notification ────────────────────────────────────────────
 
 MIN_SCORE_TO_NOTIFY = 6  # Gemini scores 1-10; email only jobs >= this
-MAX_JOBS_IN_EMAIL = 20  # top N jobs per email
+MAX_JOBS_IN_EMAIL = 50  # top N jobs per email
 
 # ── Resume ────────────────────────────────────────────────────────────
 
