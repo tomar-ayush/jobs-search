@@ -5,14 +5,15 @@ Ayush's profile: backend, data engineering, AI/LLM, full-stack.
 """
 
 import logging
+
 import pandas as pd
 from jobspy import scrape_jobs
 
 from config import (
-    SEARCH_QUERIES,
+    HOURS_OLD,
     LOCATION,
     RESULTS_PER_QUERY,
-    HOURS_OLD,
+    SEARCH_QUERIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,11 @@ def scrape_all() -> pd.DataFrame:
     df = pd.concat(all_jobs, ignore_index=True)
     before = len(df)
     df.drop_duplicates(subset=["job_url"], inplace=True)
-    logger.info("Total: %d scraped, %d dupes removed → %d unique", before, before - len(df), len(df))
+    logger.info(
+        "Total: %d scraped, %d dupes removed → %d unique",
+        before,
+        before - len(df),
+        len(df),
+    )
 
     return df
