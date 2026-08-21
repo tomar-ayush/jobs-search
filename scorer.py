@@ -1,8 +1,13 @@
 """Gemini LLM-based job relevance scorer.
 
-Sends your resume + a batch of job descriptions to Gemini and receives
-a structured relevance score (1-10) with reasoning for each job.
-Batching reduces the number of API requests and overall token usage.
+Sends your resume + batches of job descriptions to Gemini and receives
+structured relevance scores (1-10) with reasoning for each job.
+
+Design:
+- Batches are sized by estimated token count, not arbitrary fixed size.
+- Exhausted models (429) are skipped for the rest of the run.
+- A batch either fully succeeds or fully fails. Failed batches are not
+  inserted into DB, so those jobs get re-scraped and re-scored next run.
 """
 
 import json
@@ -18,6 +23,21 @@ from config import GEMINI_MODEL, RESUME_TEXT_PATH, FALLBACK_MODELS
 logger = logging.getLogger(__name__)
 
 _client = None
+
+# Models that returned 429 this run — skip for remaining batches
+_exhausted_models: set[str] = set()
+
+# ── Token estimation constants ────────────────────────────────────────
+# Rough estimate: 1 token ≈ 4 characters for English text
+CHARS_PER_TOKEN = 4
+MAX_INPUT_TOKENS = 900_000  # Conservative limit (models accept 1M+)
+MAX_OUTPUT_TOKENS = 60_000  # Cap output so response never truncates
+DESC_CHAR_LIMIT = 1500  # Per-job description cap
+
+# Estimated output tokens per job (~300 chars of JSON = ~75 tokens)
+EST_OUTPUT_TOKENS_PER_JOB = 100
+# Hard cap — even if tokens allow more, don't exceed this for reliability
+HARD_MAX_BATCH_SIZE = 50
 
 
 def _get_client() -> genai.Client:
@@ -50,7 +70,7 @@ Example format:
 {{
     "JOB_0": {{
         "score": <1-10 integer>,
-        "reasoning": "<2-3 sentence explanation>",
+        "reasoning": "<1 sentence>",
         "matching_skills": ["<skill1>", "<skill2>"],
         "missing_skills": ["<skill1>", "<skill2>"],
         "seniority_fit": "<too_junior|good|stretch|too_senior>"
@@ -80,123 +100,251 @@ def _get_resume() -> str:
     return _resume_text
 
 
-def score_jobs_batch(
-    jobs_batch: List[Dict[str, Any]],
-) -> Dict[str, Dict[str, Any]]:
-    """Scores a batch of up to 25 jobs in a single prompt."""
-    if not jobs_batch:
-        return {}
+def _estimate_tokens(text: str) -> int:
+    """Rough token count from character length."""
+    return len(text) // CHARS_PER_TOKEN
 
+
+def _compute_batch_sizes(
+    jobs: List[Dict[str, Any]],
+) -> List[List[Dict[str, Any]]]:
+    """Split jobs into batches sized by token budget, not fixed count.
+
+    Each batch is packed to fit within MAX_INPUT_TOKENS (for input) and
+    MAX_OUTPUT_TOKENS (for output). This minimizes the number of API
+    calls and avoids the fragmentation of fixed-size batching.
+    """
+    resume = _get_resume()
+    # Base prompt tokens (template + resume — everything except the jobs)
+    base_prompt = SCORING_PROMPT.format(resume=resume, jobs_text="")
+    base_tokens = _estimate_tokens(base_prompt)
+
+    # Budget for job text in input
+    input_budget = MAX_INPUT_TOKENS - base_tokens
+
+    # Budget from output side: how many jobs can we fit in MAX_OUTPUT_TOKENS?
+    max_jobs_by_output = MAX_OUTPUT_TOKENS // EST_OUTPUT_TOKENS_PER_JOB
+
+    batches: list[list[dict]] = []
+    current_batch: list[dict] = []
+    current_input_tokens = 0
+
+    for job in jobs:
+        # Build the text block for this single job
+        title = job.get("title", "Unknown")
+        company = job.get("company", "Unknown")
+        location = job.get("location", "Unknown")
+        desc = job.get("description", "")[:DESC_CHAR_LIMIT]
+        job_text = f"--- JOB_X ---\nTITLE: {title}\nCOMPANY: {company}\nLOCATION: {location}\nDESCRIPTION:\n{desc}\n"
+        job_tokens = _estimate_tokens(job_text)
+
+        would_exceed_input = (
+            current_input_tokens + job_tokens
+        ) > input_budget
+        would_exceed_output = (
+            len(current_batch) + 1
+        ) > max_jobs_by_output
+        would_exceed_hard_cap = (
+            len(current_batch) + 1
+        ) > HARD_MAX_BATCH_SIZE
+
+        if current_batch and (
+            would_exceed_input
+            or would_exceed_output
+            or would_exceed_hard_cap
+        ):
+            batches.append(current_batch)
+            current_batch = []
+            current_input_tokens = 0
+
+        current_batch.append(job)
+        current_input_tokens += job_tokens
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+def _build_prompt(jobs_batch: List[Dict[str, Any]]) -> str:
+    """Build the scoring prompt for a batch of jobs."""
     jobs_text_parts = []
     for i, job in enumerate(jobs_batch):
         title = job.get("title", "Unknown")
         company = job.get("company", "Unknown")
         location = job.get("location", "Unknown")
-        # Cap description aggressively when batching to avoid hitting prompt limits
-        # 1500 chars is usually enough to capture core responsibilities/requirements
-        desc = job.get("description", "")[:1500]
-
+        desc = job.get("description", "")[:DESC_CHAR_LIMIT]
         jobs_text_parts.append(
             f"--- JOB_{i} ---\nTITLE: {title}\nCOMPANY: {company}\nLOCATION: {location}\nDESCRIPTION:\n{desc}\n"
         )
 
-    jobs_text = "\n".join(jobs_text_parts)
-
-    prompt = SCORING_PROMPT.format(
-        resume=_get_resume(), jobs_text=jobs_text
+    return SCORING_PROMPT.format(
+        resume=_get_resume(),
+        jobs_text="\n".join(jobs_text_parts),
     )
 
-    for model_name in FALLBACK_MODELS:
+
+def _parse_response(text: str) -> dict | None:
+    """Strip markdown fences and parse JSON. Returns None on failure."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    if text.startswith("json"):
+        text = text[4:].strip()
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
+def _call_model(prompt: str) -> dict | None:
+    """Try each non-exhausted fallback model. Returns parsed dict or None."""
+    available = [
+        m for m in FALLBACK_MODELS if m not in _exhausted_models
+    ]
+
+    if not available:
+        logger.error("All models exhausted for this run.")
+        return None
+
+    for model_name in available:
         try:
             response = _get_client().models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,  # low temp for consistent scoring
-                    max_output_tokens=8192,
+                    temperature=0.2,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
                 ),
             )
 
-            text = response.text.strip()
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = (
-                    text.split("\n", 1)[1] if "\n" in text else text[3:]
-                )
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
+            result = _parse_response(response.text)
+            if result:
+                return result
 
-            result = json.loads(text)
-            return result
-
-        except json.JSONDecodeError as e:
             logger.warning(
-                "Failed to parse Gemini response for batch (Model: %s): %s",
+                "Model %s returned 200 but unparseable JSON. Trying next...",
                 model_name,
-                e,
             )
-            return {}  # Parse error is likely prompt related, fallback might not help
+            continue
+
         except Exception as e:
             error_msg = str(e).lower()
             logger.warning(
                 "Gemini API error with model %s: %s", model_name, e
             )
 
-            # If it's a rate limit or quota issue, we try the next model
             if (
                 "429" in error_msg
                 or "quota" in error_msg
                 or "exhausted" in error_msg
             ):
-                logger.info(
-                    "Rate limit / quota hit for %s. Retrying with next fallback model...",
-                    model_name,
+                _exhausted_models.add(model_name)
+                remaining = len(FALLBACK_MODELS) - len(
+                    _exhausted_models
                 )
-                continue
+                logger.info(
+                    "Model %s exhausted. %d/%d models remaining.",
+                    model_name,
+                    remaining,
+                    len(FALLBACK_MODELS),
+                )
             else:
-                # For other unknown API errors, we also retry just in case it's a temporary model issue
-                logger.info("Attempting fallback due to API error...")
-                continue
+                logger.info(
+                    "Non-quota error on %s, trying next...", model_name
+                )
+            continue
 
-    logger.error("All fallback models failed to score this batch.")
-    return {}
+    return None
+
+
+def _score_batch(jobs_batch: List[Dict[str, Any]]) -> dict | None:
+    """Score a batch. Returns parsed results dict, or None if all attempts fail.
+
+    Retries once on total failure (handles transient 503s).
+    """
+    prompt = _build_prompt(jobs_batch)
+
+    result = _call_model(prompt)
+    if result:
+        return result
+
+    # One retry for transient failures
+    logger.info("Batch failed. Retrying in 5s...")
+    time.sleep(5)
+    result = _call_model(prompt)
+    if result:
+        return result
+
+    logger.error(
+        "Batch failed after retry. %d jobs will be retried next run.",
+        len(jobs_batch),
+    )
+    return None
 
 
 def score_jobs(jobs: list[dict], delay: float = 2.0) -> list[dict]:
-    """Score a list of jobs in batches, adding score data to each job dict.
+    """Score jobs in token-optimized batches.
+
+    A batch either fully succeeds or fully fails.
+    - Succeeded: all jobs in the batch get scores and are returned.
+    - Failed: all jobs in the batch are dropped (not returned), so they
+      won't be inserted into DB and will be re-scraped next run.
 
     Args:
         jobs: List of job dicts with keys: title, company, location, description
         delay: Seconds to wait between API calls (rate limiting)
 
     Returns:
-        The same list with score, reasoning, matching, missing keys added.
+        List of successfully scored job dicts only.
     """
     total = len(jobs)
+    batches = _compute_batch_sizes(jobs)
+
     logger.info(
-        "Scoring %d jobs with Gemini (%s) in batches...",
+        "Scoring %d jobs with Gemini (%s): %d batches (token-optimized, sizes: %s)",
         total,
         GEMINI_MODEL,
+        len(batches),
+        [len(b) for b in batches],
     )
 
-    batch_size = 25
-    scored_count = 0
+    scored_jobs: list[dict] = []
 
-    for i in range(0, total, batch_size):
-        batch = jobs[i : i + batch_size]
-        batch_results = score_jobs_batch(batch)
+    for batch_idx, batch in enumerate(batches, 1):
+        batch_results = _score_batch(batch)
 
+        if batch_results is None:
+            # Entire batch failed — these jobs are simply not returned
+            logger.warning(
+                "Batch %d/%d FAILED (%d jobs dropped).",
+                batch_idx,
+                len(batches),
+                len(batch),
+            )
+            continue
+
+        # Batch succeeded — apply scores to job dicts
         for j, job in enumerate(batch):
             job_key = f"JOB_{j}"
             res = batch_results.get(job_key, {})
 
-            job["score"] = max(1, min(10, int(res.get("score", 0))))
-            job["reasoning"] = res.get(
-                "reasoning", "Failed to score or parse."
+            raw_score = res.get("score", 0)
+            try:
+                raw_score = int(raw_score)
+            except (ValueError, TypeError):
+                raw_score = 0
+
+            job["score"] = (
+                max(1, min(10, raw_score)) if raw_score > 0 else 1
             )
+            job["reasoning"] = res.get("reasoning", "")
             job["matching"] = ", ".join(
                 res.get("matching_skills", [])
                 if isinstance(res.get("matching_skills"), list)
@@ -208,20 +356,24 @@ def score_jobs(jobs: list[dict], delay: float = 2.0) -> list[dict]:
                 else []
             )
             job["seniority_fit"] = res.get("seniority_fit", "unknown")
+            scored_jobs.append(job)
 
-        scored_count += len(batch)
-        total_batches = (total + batch_size - 1) // batch_size
-        current_batch = (i // batch_size) + 1
         logger.info(
-            "  Scored batch %d/%d (total %d/%d)",
-            current_batch,
-            total_batches,
-            scored_count,
-            total,
+            "  Batch %d/%d OK (%d jobs scored, %d total so far)",
+            batch_idx,
+            len(batches),
+            len(batch),
+            len(scored_jobs),
         )
 
-        # Wait before next batch to respect rate limits
-        if delay > 0 and i + batch_size < total:
+        if delay > 0 and batch_idx < len(batches):
             time.sleep(delay)
 
-    return jobs
+    failed_count = total - len(scored_jobs)
+    logger.info(
+        "Scoring complete: %d/%d scored, %d failed (will retry next run).",
+        len(scored_jobs),
+        total,
+        failed_count,
+    )
+    return scored_jobs

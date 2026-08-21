@@ -78,12 +78,19 @@ def main():
         logger.info("\n🤖 Step 3/5: Scoring with Gemini AI...")
 
         # Convert to list of dicts for scoring
+        # score_jobs returns ONLY successfully scored jobs.
+        # Failed batches are dropped — those jobs stay out of DB
+        # and will be re-scraped and re-scored on the next run.
         jobs_to_score = df_new.to_dict(orient="records")
-        scored_jobs = score_jobs(jobs_to_score, delay=0.3)
+        scored_jobs = score_jobs(jobs_to_score, delay=2.0)
+        failed_count = len(jobs_to_score) - len(scored_jobs)
 
         # ── Step 4: Store in Astra DB ─────────────────────────────────
         logger.info("\n💾 Step 4/5: Storing results in Astra DB...")
-        db.insert_jobs(scored_jobs)
+        if scored_jobs:
+            db.insert_jobs(scored_jobs)
+        else:
+            logger.warning("No jobs were successfully scored. Nothing to store.")
 
         # ── Step 5: Notify via email ──────────────────────────────────
         logger.info("\n📧 Step 5/5: Sending email notification...")
@@ -113,6 +120,7 @@ def main():
         logger.info("  Scraped:     %d jobs", len(df))
         logger.info("  New:         %d jobs", len(df_new))
         logger.info("  Scored:      %d jobs", len(scored_jobs))
+        logger.info("  Failed:      %d jobs (will retry next run)", failed_count)
         logger.info("  Notifiable:  %d jobs (score >= %d)", len(notify_jobs), config.MIN_SCORE_TO_NOTIFY)
         logger.info("  Email sent:  %s", "Yes" if notify_jobs else "No (no high-scoring jobs)")
         logger.info("="*60)
